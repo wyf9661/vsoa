@@ -31,6 +31,8 @@ type Server struct {
 	handler Handler
 }
 
+func (s *Server) Addr() net.Addr { return s.conn.LocalAddr() }
+
 func Listen(addr string, handler Handler) (*Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -68,9 +70,23 @@ func (s *Server) loop() {
 func (s *Server) Close() error { return s.conn.Close() }
 
 func Lookup(ctx context.Context, name string, servers []string) (*net.UDPAddr, error) {
+	return LookupWithConfig(ctx, name, servers, defaultConfigPath())
+}
+
+func LookupWithConfig(ctx context.Context, name string, servers []string, configPath string) (*net.UDPAddr, error) {
 	if len(servers) == 0 {
 		if env := os.Getenv("VSOA_POS_SERVER"); env != "" {
 			servers = strings.Split(env, ",")
+		}
+	}
+	if len(servers) == 0 && configPath != "" {
+		if b, err := os.ReadFile(configPath); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					servers = append(servers, line)
+				}
+			}
 		}
 	}
 	for _, server := range servers {
@@ -111,6 +127,13 @@ func normalize(s string) string {
 		return s
 	}
 	return net.JoinHostPort(s, "54")
+}
+
+func defaultConfigPath() string {
+	if p := os.Getenv("VSOA_POS_CONF"); p != "" {
+		return p
+	}
+	return "/etc/vsoa.pos"
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }

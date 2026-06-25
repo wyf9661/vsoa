@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wyf9661/vsoa/position"
 	"github.com/wyf9661/vsoa/protocol"
 	"github.com/wyf9661/vsoa/transport"
 	"github.com/wyf9661/vsoa/workqueue"
@@ -39,6 +40,8 @@ type Client struct {
 	pending   map[uint32]chan *protocol.Decoded
 	seq       uint32
 	closed    bool
+	posServers []string
+	robotPingTurbo time.Duration
 }
 
 type RemoteClient struct {
@@ -53,6 +56,8 @@ type RemoteClient struct {
 	sendTO   time.Duration
 	closed   bool
 	mu       sync.Mutex
+	onSubscribe func(*RemoteClient, []string)
+	onUnsubscribe func(*RemoteClient, []string)
 }
 
 type Server struct {
@@ -81,6 +86,7 @@ type Stream struct {
 	listener net.Listener
 	conn     net.Conn
 	TunID    uint16
+	sendTO   time.Duration
 }
 
 func NewServer(info any, passwd string, raw bool) *Server {
@@ -177,7 +183,7 @@ func (s *Server) CreateStream(onlink func(*Stream, bool), ondata func(*Stream, [
 	}
 	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ := net.LookupPort("tcp", portStr)
-	stream := &Stream{listener: ln, TunID: uint16(port)}
+	stream := &Stream{listener: ln, TunID: uint16(port), sendTO: s.sendTO}
 	go func() {
 		_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(timeout))
 		conn, err := ln.Accept()
@@ -201,6 +207,27 @@ func (s *Server) CreateStream(onlink func(*Stream, bool), ondata func(*Stream, [
 	}()
 	return stream, nil
 }
+
+func (s *Stream) Connected() bool { return s.conn != nil }
+func (s *Stream) Close() error {
+	if s.conn != nil {
+		return s.conn.Close()
+	}
+	if s.listener != nil {
+		return s.listener.Close()
+	}
+	return nil
+}
+func (s *Stream) Send(data []byte) (int, error) {
+	if s.conn == nil {
+		return 0, errors.New("stream not connected")
+	}
+	if err := transport.WriteFull(s.conn, data, s.sendTO); err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+func (s *Stream) SendTimeout(timeout time.Duration) { s.sendTO = timeout }
 
 func (s *Server) Run(addr string, tlsOpt *transport.TLSOptions) error {
 	var ln net.Listener
@@ -384,6 +411,8 @@ func (c *RemoteClient) send(typ, flags, status uint8, seqno uint32, url string, 
 func (c *RemoteClient) ID() uint32 { return c.id }
 func (c *RemoteClient) Address() net.Addr { return c.conn.RemoteAddr() }
 func (c *RemoteClient) SetAuthed(v bool) { c.authed = v }
+func (c *RemoteClient) OnSubscribe(fn func(*RemoteClient, []string)) { c.onSubscribe = fn }
+func (c *RemoteClient) OnUnsubscribe(fn func(*RemoteClient, []string)) { c.onUnsubscribe = fn }
 func (c *RemoteClient) Close() { c.closeInternal() }
 func (c *RemoteClient) IsClosed() bool { return c.closed }
 func (c *RemoteClient) Reply(seqno uint32, payload *Payload, status uint8, tunid uint16) bool {
@@ -412,11 +441,16 @@ func (c *RemoteClient) IsSubscribed(url string) bool {
 func (c *RemoteClient) subscribe(url string, param any) uint8 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	topics := []string{}
 	if url != "" {
 		if !strings.HasPrefix(url, "/") {
 			return protocol.StatusArguments
 		}
 		c.subs[url] = struct{}{}
+		topics = append(topics, url)
+		if c.onSubscribe != nil {
+			go c.onSubscribe(c, topics)
+		}
 		return 0
 	}
 	list, ok := param.([]any)
@@ -426,7 +460,11 @@ func (c *RemoteClient) subscribe(url string, param any) uint8 {
 	for _, item := range list {
 		if s, ok := item.(string); ok && strings.HasPrefix(s, "/") {
 			c.subs[s] = struct{}{}
+			topics = append(topics, s)
 		}
+	}
+	if c.onSubscribe != nil && len(topics) > 0 {
+		go c.onSubscribe(c, topics)
 	}
 	return 0
 }
@@ -434,11 +472,16 @@ func (c *RemoteClient) subscribe(url string, param any) uint8 {
 func (c *RemoteClient) unsubscribe(url string, param any) uint8 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	topics := []string{}
 	if url != "" {
 		if !strings.HasPrefix(url, "/") {
 			return protocol.StatusArguments
 		}
 		delete(c.subs, url)
+		topics = append(topics, url)
+		if c.onUnsubscribe != nil {
+			go c.onUnsubscribe(c, topics)
+		}
 		return 0
 	}
 	list, ok := param.([]any)
@@ -448,7 +491,11 @@ func (c *RemoteClient) unsubscribe(url string, param any) uint8 {
 	for _, item := range list {
 		if s, ok := item.(string); ok {
 			delete(c.subs, s)
+			topics = append(topics, s)
 		}
+	}
+	if c.onUnsubscribe != nil && len(topics) > 0 {
+		go c.onUnsubscribe(c, topics)
 	}
 	return 0
 }
@@ -479,11 +526,28 @@ func NewClient(raw bool) *Client {
 	}
 }
 
+func (c *Client) SetPositionServers(servers ...string) { c.posServers = append([]string(nil), servers...) }
+func (c *Client) Pendings() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pending)
+}
+
 func (c *Client) OnConnect(fn func(*Client, bool, any)) { c.onConnect = fn }
 func (c *Client) OnMessage(fn func(*Client, string, Payload, bool)) { c.onMessage = fn }
 func (c *Client) OnData(fn func(*Client, string, Payload, bool)) { c.onData = fn }
 func (c *Client) Connected() bool { return c.conn != nil && !c.closed }
-func (c *Client) GetPeerCert() any { return nil }
+func (c *Client) GetPeerCert() any {
+	if tc, ok := c.conn.(*tls.Conn); ok {
+		state := tc.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			return state.PeerCertificates[0]
+		}
+	}
+	return nil
+}
+func (c *Client) SetRobotPingTurbo(d time.Duration) { c.robotPingTurbo = d }
+func (c *Client) RobotPingTurbo() time.Duration { return c.robotPingTurbo }
 
 func ParseURL(raw string) (hostport string, path string, err error) {
 	if !strings.HasPrefix(raw, "vsoa://") {
@@ -499,8 +563,28 @@ func ParseURL(raw string) (hostport string, path string, err error) {
 	return
 }
 
+func resolveHostPort(ctx context.Context, hostport string, posServers []string) (string, error) {
+	if hostport == "" {
+		return "", errors.New("empty host")
+	}
+	if strings.Contains(hostport, ":") {
+		return hostport, nil
+	}
+	addr, err := position.Lookup(ctx, hostport, posServers)
+	if err != nil {
+		return "", err
+	}
+	return addr.String(), nil
+}
+
 func (c *Client) Connect(rawURL, passwd string, timeout time.Duration, tlsOpt *transport.TLSOptions) error {
 	hostport, _, err := ParseURL(rawURL)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	hostport, err = resolveHostPort(ctx, hostport, c.posServers)
 	if err != nil {
 		return err
 	}
@@ -668,6 +752,14 @@ func (c *Client) Call(url string, method int, payload *Payload, timeout time.Dur
 	return &resp.Header, &resp.Payload, nil
 }
 
+func (c *Client) CallAsync(url string, method int, payload *Payload, timeout time.Duration, callback func(*Header, *Payload, error)) error {
+	go func() {
+		h, p, err := c.Call(url, method, payload, timeout)
+		callback(h, p, err)
+	}()
+	return nil
+}
+
 func (c *Client) Ping(timeout time.Duration) error {
 	_, err := c.request(protocol.TypePingEcho, 0, "", nil, timeout, true)
 	return err
@@ -729,7 +821,17 @@ func (c *Client) CreateStream(tunid uint16, onlink func(net.Conn, bool), ondata 
 	host, _, _ := net.SplitHostPort(c.server)
 	addr := net.JoinHostPort(host, fmt.Sprint(tunid))
 	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.Dial("tcp", addr)
+	var conn net.Conn
+	var err error
+	if c.tlsOpt != nil {
+		cfg, _, cfgErr := transport.NewClientTLSConfig(*c.tlsOpt)
+		if cfgErr != nil {
+			return nil, cfgErr
+		}
+		conn, err = tls.DialWithDialer(&dialer, "tcp", addr, cfg)
+	} else {
+		conn, err = dialer.Dial("tcp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -762,7 +864,11 @@ func (c *Client) Robot(ctx context.Context, rawURL, passwd string, keepalive, co
 				time.Sleep(reconnDelay)
 				continue
 			}
-			ticker := time.NewTicker(keepalive)
+			interval := keepalive
+			if c.robotPingTurbo > 0 && c.robotPingTurbo < interval {
+				interval = c.robotPingTurbo
+			}
+			ticker := time.NewTicker(interval)
 			for c.Connected() {
 				select {
 				case <-ctx.Done():
