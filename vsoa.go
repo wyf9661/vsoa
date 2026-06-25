@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wyf9661/vsoa/position"
+	vsoapos "github.com/wyf9661/vsoa/position"
 	"github.com/wyf9661/vsoa/protocol"
 	"github.com/wyf9661/vsoa/transport"
 	"github.com/wyf9661/vsoa/workqueue"
@@ -570,7 +570,7 @@ func resolveHostPort(ctx context.Context, hostport string, posServers []string) 
 	if strings.Contains(hostport, ":") {
 		return hostport, nil
 	}
-	addr, err := position.Lookup(ctx, hostport, posServers)
+	addr, err := vsoapos.Lookup(ctx, hostport, posServers)
 	if err != nil {
 		return "", err
 	}
@@ -913,6 +913,24 @@ func Fetch(rawURL, passwd string, method int, payload *Payload, timeout time.Dur
 		return nil, nil, err
 	}
 	return cli.Call(path, method, payload, timeout)
+}
+
+type PositionQuery = vsoapos.Query
+type PositionServerInfo = vsoapos.ServerInfo
+
+type PositionServer = vsoapos.Server
+
+func ListenPosition(addr string, handler func(PositionQuery) *PositionServerInfo) (*PositionServer, error) {
+	return vsoapos.Listen(addr, func(q vsoapos.Query) *vsoapos.ServerInfo { return handler(q) })
+}
+
+var globalPosServer []string
+
+func SetPositionServer(addr string, port int) { globalPosServer = []string{net.JoinHostPort(addr, fmt.Sprint(port))} }
+func LookupPosition(name string) (*net.UDPAddr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return vsoapos.Lookup(ctx, name, globalPosServer)
 }
 
 func connRemoteIP(conn net.Conn) net.IP {
