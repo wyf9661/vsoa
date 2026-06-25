@@ -1,13 +1,13 @@
 # VSOA for Go
 
-VSOA is the abbreviation of Vehicle SOA. This repository is a Go implementation of the VSOA protocol and SDK, designed to be wire-compatible with the Python implementation at https://github.com/acoinfo/vsoa-python.
+VSOA for Go is a Go SDK and protocol implementation for building TCP/UDP based service-oriented communication with RPC, publish-subscribe, datagram, stream, TLS, position discovery, and reconnect support.
 
 Current status:
 - TCP + UDP quick dual-channel protocol implemented
 - RPC / publish-subscribe / datagram / stream implemented
 - TLS one-way and mutual-auth tested
-- Go ↔ Python interoperability tested for RPC, datagram, stream
-- position discovery implemented with top-level compatibility helpers
+- position discovery implemented
+- examples provided for common workflows
 
 ## Features
 
@@ -118,9 +118,9 @@ Main methods:
 h, p, err := vsoa.Fetch("vsoa://127.0.0.1:3005/echo", "123456", 0, &vsoa.Payload{Param: map[string]any{"a": 1}}, 3*time.Second, false, nil)
 ```
 
-### Position compatibility helpers
+### Position helpers
 
-To align more closely with the Python implementation, the top-level package also exposes:
+The top-level package exposes:
 - `ListenPosition(addr string, handler func(PositionQuery) *PositionServerInfo) (*PositionServer, error)`
 - `SetPositionServer(addr string, port int)`
 - `LookupPosition(name string) (*net.UDPAddr, error)`
@@ -200,17 +200,6 @@ Typical patterns:
 - server-only TLS: set `Cert` + `Key`
 - mutual TLS: set server `CACert` + `RequireClientCert`, and client `CACert` + `Cert` + `Key`
 
-## Interoperability status
-
-Automated tests currently cover:
-- Go server ↔ Python client RPC
-- Python server ↔ Go client RPC
-- Go server ↔ Python client datagram
-- Python server ↔ Go client datagram
-- Python server ↔ Go client stream
-- TLS one-way auth
-- TLS mutual auth
-
 ## Testing
 
 Run all tests:
@@ -219,7 +208,7 @@ Run all tests:
 go test ./...
 ```
 
-Focused interop tests:
+Focused protocol / TLS / robot / interop related tests:
 
 ```bash
 go test ./... -run 'Interop|TLS|Stream|Robot' -count=1
