@@ -415,6 +415,30 @@ func (c *RemoteClient) OnSubscribe(fn func(*RemoteClient, []string)) { c.onSubsc
 func (c *RemoteClient) OnUnsubscribe(fn func(*RemoteClient, []string)) { c.onUnsubscribe = fn }
 func (c *RemoteClient) Close() { c.closeInternal() }
 func (c *RemoteClient) IsClosed() bool { return c.closed }
+func (c *RemoteClient) Keepalive(idle int) {
+	if tc, ok := c.conn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(time.Duration(idle) * time.Second)
+	}
+}
+func (c *RemoteClient) GetPeerCert() any {
+	if tc, ok := c.conn.(*tls.Conn); ok {
+		state := tc.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			return state.PeerCertificates[0]
+		}
+	}
+	return nil
+}
+func (c *RemoteClient) Priority() int { return c.priority }
+func (c *RemoteClient) SetPriority(prio int) {
+	if prio < 0 || prio > 7 {
+		return
+	}
+	c.mu.Lock()
+	c.priority = prio
+	c.mu.Unlock()
+}
 func (c *RemoteClient) Reply(seqno uint32, payload *Payload, status uint8, tunid uint16) bool {
 	b := protocol.NewBuilder().Header(protocol.TypeRPC, protocol.FlagReply, status, seqno).TunID(tunid)
 	if payload != nil {
@@ -660,7 +684,11 @@ func (c *Client) Connect(rawURL, passwd string, timeout time.Duration, tlsOpt *t
 func (c *Client) loop() {
 	buf := make([]byte, protocol.MaxPacketLength)
 	for {
-		n, err := c.conn.Read(buf)
+		conn := c.conn
+		if conn == nil {
+			break
+		}
+		n, err := conn.Read(buf)
 		if err != nil {
 			break
 		}
@@ -671,7 +699,9 @@ func (c *Client) loop() {
 			break
 		}
 	}
-	c.Close()
+	if !c.closed {
+		c.Close()
+	}
 }
 
 func (c *Client) handlePacket(pkt *protocol.Decoded, quick bool) {
@@ -852,7 +882,18 @@ func (c *Client) CreateStream(tunid uint16, onlink func(net.Conn, bool), ondata 
 	return conn, nil
 }
 
+const clientAutoMaxPingLost = 3
+
+type robotState struct {
+	mu        sync.Mutex
+	pingLost  int
+	lastPing  time.Time
+	lastTurbo time.Time
+	keepalive time.Duration
+}
+
 func (c *Client) Robot(ctx context.Context, rawURL, passwd string, keepalive, connTimeout, reconnDelay time.Duration, tlsOpt *transport.TLSOptions) {
+	rs := &robotState{keepalive: keepalive}
 	go func() {
 		for {
 			select {
@@ -864,6 +905,12 @@ func (c *Client) Robot(ctx context.Context, rawURL, passwd string, keepalive, co
 				time.Sleep(reconnDelay)
 				continue
 			}
+			rs.mu.Lock()
+			rs.pingLost = 0
+			rs.lastPing = time.Now()
+			rs.lastTurbo = time.Now()
+			rs.mu.Unlock()
+
 			interval := keepalive
 			if c.robotPingTurbo > 0 && c.robotPingTurbo < interval {
 				interval = c.robotPingTurbo
@@ -876,7 +923,34 @@ func (c *Client) Robot(ctx context.Context, rawURL, passwd string, keepalive, co
 					ticker.Stop()
 					return
 				case <-ticker.C:
-					_ = c.Ping(keepalive)
+					rs.mu.Lock()
+					elapsed := time.Since(rs.lastPing)
+					turbo := c.robotPingTurbo
+					rs.mu.Unlock()
+
+					needPing := false
+					if elapsed >= keepalive {
+						needPing = true
+					} else if turbo > 0 && c.Pendings() > 0 && elapsed >= turbo {
+						needPing = true
+					}
+					if needPing {
+						err := c.Ping(keepalive)
+						rs.mu.Lock()
+						if err != nil {
+							rs.pingLost++
+							if rs.pingLost > clientAutoMaxPingLost {
+								rs.mu.Unlock()
+								c.Close()
+								break
+							}
+						} else {
+							rs.pingLost = 0
+						}
+						rs.lastPing = time.Now()
+						rs.lastTurbo = time.Now()
+						rs.mu.Unlock()
+					}
 				}
 			}
 			ticker.Stop()
