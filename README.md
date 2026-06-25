@@ -1,101 +1,208 @@
 # VSOA for Go
 
-VSOA (Vehicle SOA) is a reliable, real-time Service Oriented Architecture framework originally by ACOINFO. This is a Go reimplementation providing full protocol compatibility with the Python SDK (`vsoa-python`).
+VSOA is the abbreviation of Vehicle SOA. This repository is a Go implementation of the VSOA protocol and SDK, designed to be wire-compatible with the Python implementation at https://github.com/acoinfo/vsoa-python.
+
+Current status:
+- TCP + UDP quick dual-channel protocol implemented
+- RPC / publish-subscribe / datagram / stream implemented
+- TLS one-way and mutual-auth tested
+- Go ↔ Python interoperability tested for RPC, datagram, stream
+- position discovery implemented with top-level compatibility helpers
 
 ## Features
 
-- **TCP + UDP dual-channel** protocol with quick channel for high-frequency data
-- **RPC** (Remote Procedure Call) with GET/SET methods
-- **Publish/Subscribe** with URL prefix matching
-- **Datagram** (reliable TCP + unreliable UDP quick)
-- **Stream tunnels** for high-throughput data transfer
-- **TLS** one-way and mutual authentication
-- **WorkQueue** for serial async command execution
-- **Client robot** auto-reconnect with keepalive
-- **Position service** discovery (UDP name lookup)
+- Unified URL-based service model
+- URL prefix matching subscribe/publish model
+- Real-time RPC (GET/SET)
+- Reliable TCP publish/datagram
+- Unreliable quick UDP publish/datagram
+- Stream tunnels for large or high-throughput data
+- TLS server/client support, including mutual TLS
+- WorkQueue, Timer, EventEmitter helper packages
+- Position service discovery via UDP
+- Robot reconnect mode with keepalive/turbo interval support
 
-## Quick Start
+## Protocol notes
+
+- Main channel: TCP
+- Quick channel: UDP
+- Packet header length: 20 bytes
+- TCP max packet length: 262144 bytes
+- Quick max packet length: 65507 bytes
+- Packet alignment: 4 bytes
+- Method values:
+  - GET = 0
+  - SET = 1
+
+Quick channel is intended for high-frequency traffic where strict delivery guarantees are not required.
+
+## Package layout
+
+- `vsoa.go` — main public API (`Server`, `Client`, `RemoteClient`, `Stream`, `Fetch`)
+- `protocol/` — packet encode/decode, unpacker, constants, subscription matching
+- `transport/` — TLS helpers and full-write helper
+- `position/` — UDP name lookup service
+- `workqueue/` — serial async job queue
+- `timer/` — timer helper
+- `events/` — event emitter helper
+- `examples/` — runnable examples
+
+## Public API overview
 
 ### Server
 
 ```go
-package main
-
-import (
-	"fmt"
-	"github.com/wyf9661/vsoa"
-)
-
-func main() {
-	s := vsoa.NewServer("Go VSOA Server", "123456", false)
-	s.OnClient(func(cli *vsoa.RemoteClient, conn bool) {
-		fmt.Println("Client", cli.ID(), "connected:", conn)
-	})
-	s.Command("/echo", nil, func(cli *vsoa.RemoteClient, req vsoa.Request, payload vsoa.Payload) {
-		cli.Reply(req.SeqNo, &payload, 0, 0)
-	})
-	s.Command("/foo", nil, func(cli *vsoa.RemoteClient, req vsoa.Request, payload vsoa.Payload) {
-		fmt.Println("foo", payload.Param)
-		cli.Reply(req.SeqNo, &payload, 0, 0)
-	})
-	fmt.Println("Server listening on :3005")
-	if err := s.Run("0.0.0.0:3005", nil); err != nil {
-		panic(err)
-	}
-}
+s := vsoa.NewServer("Go VSOA Server", "123456", false)
 ```
+
+Main methods:
+- `NewServer(info any, passwd string, raw bool) *Server`
+- `Run(addr string, tlsOpt *transport.TLSOptions) error`
+- `Close() error`
+- `Address() net.Addr`
+- `Clients() []*RemoteClient`
+- `OnClient(func(*RemoteClient, bool))`
+- `OnData(func(*RemoteClient, string, Payload, bool))`
+- `Command(url string, q *workqueue.Queue, h Handler)`
+- `Publish(url string, payload *Payload, quick bool) bool`
+- `IsSubscribed(url string) bool`
+- `CreateStream(onlink func(*Stream, bool), ondata func(*Stream, []byte), timeout time.Duration) (*Stream, error)`
+- `SendTimeout(timeout time.Duration)`
+
+### RemoteClient
+
+Main methods:
+- `ID() uint32`
+- `Address() net.Addr`
+- `SetAuthed(bool)`
+- `Close()`
+- `IsClosed() bool`
+- `Reply(seqno uint32, payload *Payload, status uint8, tunid uint16) bool`
+- `Datagram(url string, payload *Payload, quick bool) bool`
+- `IsSubscribed(url string) bool`
+- `OnSubscribe(func(*RemoteClient, []string))`
+- `OnUnsubscribe(func(*RemoteClient, []string))`
 
 ### Client
 
 ```go
-package main
-
-import (
-	"fmt"
-	"time"
-	"github.com/wyf9661/vsoa"
-)
-
-func main() {
-	cli := vsoa.NewClient(false)
-	if err := cli.Connect("vsoa://127.0.0.1:3005", "123456", 5*time.Second, nil); err != nil {
-		panic(err)
-	}
-	defer cli.Close()
-	h, p, err := cli.Call("/echo", 0, &vsoa.Payload{Param: map[string]any{"hello": "world"}}, 3*time.Second)
-	if err != nil {
-		fmt.Println("error:", err)
-	} else {
-		fmt.Println("header:", h, "payload:", p)
-	}
-}
+cli := vsoa.NewClient(false)
+err := cli.Connect("vsoa://127.0.0.1:3005", "123456", 5*time.Second, nil)
 ```
 
-## Project Structure
+Main methods:
+- `NewClient(raw bool) *Client`
+- `Connect(rawURL, passwd string, timeout time.Duration, tlsOpt *transport.TLSOptions) error`
+- `Close()`
+- `Connected() bool`
+- `OnConnect(func(*Client, bool, any))`
+- `OnMessage(func(*Client, string, Payload, bool))`
+- `OnData(func(*Client, string, Payload, bool))`
+- `Call(url string, method int, payload *Payload, timeout time.Duration) (*Header, *Payload, error)`
+- `CallAsync(url string, method int, payload *Payload, timeout time.Duration, callback func(*Header, *Payload, error)) error`
+- `Ping(timeout time.Duration) error`
+- `Subscribe(urls any, timeout time.Duration) error`
+- `Unsubscribe(urls any, timeout time.Duration) error`
+- `Datagram(url string, payload *Payload, quick bool) error`
+- `CreateStream(tunid uint16, onlink func(net.Conn, bool), ondata func([]byte), timeout time.Duration) (net.Conn, error)`
+- `Robot(ctx context.Context, rawURL, passwd string, keepalive, connTimeout, reconnDelay time.Duration, tlsOpt *transport.TLSOptions)`
+- `SetRobotPingTurbo(time.Duration)`
+- `RobotPingTurbo() time.Duration`
+- `Pendings() int`
+- `GetPeerCert() any`
+- `SetPositionServers(...string)`
 
+### One-shot fetch
+
+```go
+h, p, err := vsoa.Fetch("vsoa://127.0.0.1:3005/echo", "123456", 0, &vsoa.Payload{Param: map[string]any{"a": 1}}, 3*time.Second, false, nil)
 ```
-vsoa/
-  protocol/     # Packet encoding/decoding, constants, URL matching
-  transport/    # TLS config, full-write helper
-  workqueue/    # Serial async job queue
-  timer/        # One-shot / interval timer
-  events/       # EventEmitter (Node.js style)
-  position/     # UDP position service (name → addr:port)
-  vsoa.go       # Server, Client, RemoteClient, Stream, Fetch
+
+### Position compatibility helpers
+
+To align more closely with the Python implementation, the top-level package also exposes:
+- `ListenPosition(addr string, handler func(PositionQuery) *PositionServerInfo) (*PositionServer, error)`
+- `SetPositionServer(addr string, port int)`
+- `LookupPosition(name string) (*net.UDPAddr, error)`
+
+## Examples
+
+### 1. Position server
+
+File: `examples/position_server/main.go`
+
+Run:
+```bash
+go run ./examples/position_server
 ```
+
+### 2. VSOA server
+
+File: `examples/server/main.go`
+
+Run:
+```bash
+go run ./examples/server
+```
+
+### 3. VSOA client using position discovery
+
+File: `examples/client/main.go`
+
+Run:
+```bash
+go run ./examples/client
+```
+
+Startup order:
+1. start `examples/position_server`
+2. start `examples/server`
+3. start `examples/client`
+
+## TLS options
+
+`transport.TLSOptions` supports:
+- `Hostname`
+- `CACert`
+- `Cert`
+- `Key`
+- `Password`
+- `InsecureSkipVerify`
+- `RequireClientCert`
+- `HandshakeErrorLog`
+- `LoadDefaultCerts`
+
+Typical patterns:
+- server-only TLS: set `Cert` + `Key`
+- mutual TLS: set server `CACert` + `RequireClientCert`, and client `CACert` + `Cert` + `Key`
+
+## Interoperability status
+
+Automated tests currently cover:
+- Go server ↔ Python client RPC
+- Python server ↔ Go client RPC
+- Go server ↔ Python client datagram
+- Python server ↔ Go client datagram
+- Python server ↔ Go client stream
+- TLS one-way auth
+- TLS mutual auth
 
 ## Testing
+
+Run all tests:
 
 ```bash
 go test ./...
 ```
 
-## Protocol Compatibility
+Focused interop tests:
 
-This library is wire-compatible with `vsoa-python`. Go clients can connect to Python servers and vice versa. The packet format uses big-endian encoding with 20-byte headers, 4-byte alignment, and supports both TCP (reliable) and UDP (quick) channels.
+```bash
+go test ./... -run 'Interop|TLS|Stream|Robot' -count=1
+```
 
 ## License
 
-Copyright (c) 2025 wyf9661. All rights reserved.
+Copyright (c) 2025 wyf9661.
 
-Licensed under the Apache-2.0 license. See [LICENSE](LICENSE) for details.
+Licensed under Apache-2.0. See `LICENSE`.
