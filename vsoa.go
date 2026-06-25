@@ -572,6 +572,18 @@ func (c *Client) GetPeerCert() any {
 }
 func (c *Client) SetRobotPingTurbo(d time.Duration) { c.robotPingTurbo = d }
 func (c *Client) RobotPingTurbo() time.Duration { return c.robotPingTurbo }
+func (c *Client) Linger(sec int) bool {
+	if c.conn == nil || c.closed {
+		return false
+	}
+	if tc, ok := c.conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(sec)
+		return true
+	}
+	return false
+}
+func (c *Client) SendTimeout() time.Duration { return c.sendTO }
+func (c *Client) SetSendTimeout(d time.Duration) { c.sendTO = d }
 
 func ParseURL(raw string) (hostport string, path string, err error) {
 	if !strings.HasPrefix(raw, "vsoa://") {

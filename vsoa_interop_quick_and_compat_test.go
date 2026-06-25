@@ -30,14 +30,14 @@ func TestInteropPythonServerGoClientQuickDatagram(t *testing.T) {
 	}
 	py := requirePythonExampleEnv(t)
 	root := "/home/ivan/work/vsoa-python"
-	script := filepath.Join(root, "interop_server_quick.py")
+	script := filepath.Join(root, "interop_server_quick2.py")
 	code := `import time, vsoa
-server = vsoa.Server('py-quick', '123456')
+server = vsoa.Server('py-quick2', '123456')
 def ondata(cli, url, payload, quick):
-    if url == '/go/quickdata' and quick:
-        cli.datagram('/py/quickreply', {'param': {'quick':'reply'}}, quick=True)
+    if url == '/go/quickdata2' and quick:
+        cli.datagram('/py/quickreply2', {'param': {'quick':'reply'}}, quick=True)
 server.ondata = ondata
-server.run('127.0.0.1', 3020)
+server.run('127.0.0.1', 3021)
 `
 	if err := os.WriteFile(script, []byte(code), 0o644); err != nil {
 		t.Fatal(err)
@@ -52,22 +52,22 @@ server.run('127.0.0.1', 3020)
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	}()
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(1000 * time.Millisecond)
 	cli := vsoa.NewClient(false)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	cli.OnData(func(c *vsoa.Client, url string, p vsoa.Payload, quick bool) {
-		if url == "/py/quickreply" && quick {
+		if url == "/py/quickreply2" && quick {
 			wg.Done()
 		}
 	})
-	if err := cli.Connect("vsoa://127.0.0.1:3020", "123456", 3*time.Second, nil); err != nil {
+	if err := cli.Connect("vsoa://127.0.0.1:3021", "123456", 3*time.Second, nil); err != nil {
 		t.Fatal(err)
 	}
 	defer cli.Close()
-	err := cli.Datagram("/go/quickdata", &vsoa.Payload{Param: map[string]any{"q": true}}, true)
+	err := cli.Datagram("/go/quickdata2", &vsoa.Payload{Param: map[string]any{"q": true}}, true)
 	if err != nil && err.Error() == "quick unavailable" {
-		t.Skip("quick channel not established (cid=0), likely python server did not return quick port")
+		t.Skip("quick channel not established")
 	}
 	if err != nil {
 		t.Fatal(err)
