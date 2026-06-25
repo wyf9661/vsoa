@@ -30,7 +30,8 @@ func TestInteropPythonServerGoClientQuickDatagram(t *testing.T) {
 	}
 	py := requirePythonExampleEnv(t)
 	root := "/home/ivan/work/vsoa-python"
-	script := filepath.Join(root, "interop_server_quick2.py")
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "interop_server_quick2.py")
 	code := `import time, vsoa
 server = vsoa.Server('py-quick2', '123456')
 def ondata(cli, url, payload, quick):

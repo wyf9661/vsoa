@@ -44,7 +44,8 @@ func TestInteropPythonServerGoClientDatagram(t *testing.T) {
 	}
 	py := requirePythonExampleEnv(t)
 	root := "/home/ivan/work/vsoa-python"
-	script := filepath.Join(root, "interop_server_datagram.py")
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "interop_server_datagram.py")
 	code := `import time, vsoa
 server = vsoa.Server('py-dgram', '123456')
 seen = {'ok': False}
@@ -93,7 +94,8 @@ func TestInteropPythonServerGoClientStream(t *testing.T) {
 	}
 	py := requirePythonExampleEnv(t)
 	root := "/home/ivan/work/vsoa-python"
-	script := filepath.Join(root, "interop_server_stream.py")
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "interop_server_stream.py")
 	code := `import vsoa
 server = vsoa.Server('py-stream', '123456')
 @server.command('/get_data')
